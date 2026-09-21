@@ -8,11 +8,11 @@ import pandas as pd
 
 
 BASE_DIR = Path("/mnt/secondary/dataset/person_cctv/GW")
-OUTPUT_DIR = Path("/mnt/secondary/dataset/person_cctv/GW_sampled")
+OUTPUT_DIR = Path("/mnt/secondary/dataset/person_cctv/GW/1_2_0_RAW")
+output_report = Path("/mnt/secondary/ingestion_weight_analyzer/data/result/sampling")
+WEIGHT_FILE = Path("data/result/dataset_1.csv")
 
-WEIGHT_FILE = Path("data/dataset_1_weight.csv")
-
-SAMPLE_SIZE = 2000
+SAMPLE_SIZE = 3000
 SEED = 42
 
 IMAGE_PATTERN = re.compile(
@@ -375,7 +375,7 @@ def main() -> None:
     )
 
     report.to_csv(
-        "sample_report.csv",
+        f"{output_report}_sample_report.csv",
         index=False,
     )
 
@@ -394,7 +394,7 @@ def main() -> None:
     )
 
     manifest.to_csv(
-        "sample_manifest.csv",
+        f"{output_report}_sample_manifest.csv",
         index=False,
     )
 

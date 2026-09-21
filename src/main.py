@@ -1,8 +1,8 @@
 import pandas as pd
-
+import os
 filename = "dataset_1.csv"
 existing_data = 6000
-added_data = 2000
+added_data = 3000
 total_data = existing_data + added_data
 
 dataset_data = pd.read_csv(f"data/{filename}")
@@ -105,4 +105,6 @@ print(f"Allocated images  : {result['Added_Images'].sum()}")
 print()
 
 print(result.to_string(index=False))
+
+os.makedirs("data/result",exist_ok=True)
 result.to_csv(f"data/result/{filename}")
