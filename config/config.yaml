@@ -1,0 +1,20 @@
+model:
+  path: "models/best.pt"
+  confidence: 0.5
+  iou: 0.3
+
+  class:
+    - person
+
+  minimum_count: 3
+
+dataset:
+  input_dir: "/mnt/secondary/dataset/person_cctv/GW"
+  output_dir: "/mnt/secondary/dataset/person_cctv/GW_prefiltered"
+
+inference:
+  device: 0
+  batch_size: 16
+
+output:
+  manifest: "data/prefilter_manifest.csv"
