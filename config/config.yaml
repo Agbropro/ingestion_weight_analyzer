@@ -21,8 +21,14 @@ output:
 
 sampler:
   input_dir: "/mnt/secondary/dataset/person_cctv/GW_1_3_0_prefiltered"
-  output_dir: "/mnt/secondary/dataset/person_cctv/GW/1_2_0_RAW"
+  output_dir: "/mnt/secondary/dataset/person_cctv/GW/1_3_0_RAW"
   weight_file: "data/result/dataset_1.csv"
   output_report: "data/result/sampling"
   sample_size: 3000
   seed: 42
+
+
+copy_by_nvr_ip:
+  base_path: "/mnt/secondary/dataset/person_cctv/GW/1_3_0_RAW"
+  destination: "/mnt/secondary/dataset/person_cctv/GW/1_3_0_sampled"
+  ip_prefix: "192.168.2."
