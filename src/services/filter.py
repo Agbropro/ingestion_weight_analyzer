@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 import yaml
+from PIL import Image, UnidentifiedImageError
 from ultralytics import YOLO
 
 
@@ -164,6 +165,351 @@ def make_batches(
     ]
 
 
+def check_image(path: Path) -> tuple[bool, str]:
+    """Check whether an image can be decoded."""
+    try:
+        with Image.open(path) as image:
+            image.verify()
+
+        return True, ""
+
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ) as error:
+        return False, str(error)
+
+
+def load_processed(
+    manifest_path: Path,
+) -> tuple[set[str], int, int, int]:
+    """Load previously processed image paths."""
+    if not manifest_path.exists():
+        return set(), 0, 0, 0
+
+    try:
+        manifest = pd.read_csv(
+            manifest_path,
+        )
+    except (
+        pd.errors.EmptyDataError,
+        pd.errors.ParserError,
+    ):
+        return set(), 0, 0, 0
+
+    if "source" not in manifest.columns:
+        return set(), 0, 0, 0
+
+    processed = set(
+        manifest["source"]
+        .dropna()
+        .astype(str)
+    )
+
+    if "status" not in manifest.columns:
+        return processed, 0, 0, 0
+
+    status = (
+        manifest["status"]
+        .fillna("")
+        .astype(str)
+    )
+
+    passed = int(
+        (status == "passed").sum()
+    )
+
+    rejected = int(
+        (status == "rejected").sum()
+    )
+
+    invalid = int(
+        (status == "invalid").sum()
+    )
+
+    return (
+        processed,
+        passed,
+        rejected,
+        invalid,
+    )
+
+
+def save_records(
+    records: list[dict[str, Any]],
+    manifest_path: Path,
+) -> None:
+    """Append batch records to manifest."""
+    if not records:
+        return
+
+    manifest_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    has_data = (
+        manifest_path.exists()
+        and manifest_path.stat().st_size > 0
+    )
+
+    pd.DataFrame(records).to_csv(
+        manifest_path,
+        mode="a",
+        header=not has_data,
+        index=False,
+    )
+
+
+def make_record(
+    image_path: Path,
+    requested_classes: list[str],
+    counts: Counter[str] | None = None,
+    passed: bool = False,
+    destination: Path | None = None,
+    status: str = "rejected",
+    error: str = "",
+) -> dict[str, Any]:
+    """Create manifest record."""
+    counts = counts or Counter()
+
+    record: dict[str, Any] = {
+        "source": str(image_path),
+        "status": status,
+        "passed": passed,
+        "object_count": sum(counts.values()),
+        "destination": (
+            str(destination)
+            if destination is not None
+            else ""
+        ),
+        "error": error,
+    }
+
+    for class_name in requested_classes:
+        record[f"count_{class_name}"] = counts.get(
+            class_name,
+            0,
+        )
+
+    return record
+
+
+def process_result(
+    image_path: Path,
+    result: Any,
+    names: dict[int, str],
+    requested_classes: list[str],
+    minimum_count: int,
+    input_dir: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Process one inference result."""
+    counts = count_objects(
+        result=result,
+        names=names,
+    )
+
+    total_objects = sum(
+        counts.values()
+    )
+
+    passed = (
+        total_objects
+        >= minimum_count
+    )
+
+    destination = None
+    status = "rejected"
+
+    if passed:
+        destination = copy_image(
+            source=image_path,
+            input_dir=input_dir,
+            output_dir=output_dir,
+        )
+
+        status = "passed"
+
+    return make_record(
+        image_path=image_path,
+        requested_classes=requested_classes,
+        counts=counts,
+        passed=passed,
+        destination=destination,
+        status=status,
+    )
+
+
+def predict_single(
+    model: YOLO,
+    image_path: Path,
+    confidence: float,
+    iou: float,
+    class_ids: list[int],
+    device: Any,
+) -> Any:
+    """Run YOLO inference on one image."""
+    results = model.predict(
+        source=str(image_path),
+        conf=confidence,
+        iou=iou,
+        classes=class_ids,
+        device=device,
+        verbose=False,
+    )
+
+    if not results:
+        raise RuntimeError(
+            f"No YOLO result returned for {image_path}"
+        )
+
+    return results[0]
+
+
+def process_batch(
+    model: YOLO,
+    batch: list[Path],
+    confidence: float,
+    iou: float,
+    class_ids: list[int],
+    device: Any,
+    names: dict[int, str],
+    requested_classes: list[str],
+    minimum_count: int,
+    input_dir: Path,
+    output_dir: Path,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Process batch with unreadable-image fallback."""
+    sources = [
+        str(path)
+        for path in batch
+    ]
+
+    try:
+        results = model.predict(
+            source=sources,
+            conf=confidence,
+            iou=iou,
+            classes=class_ids,
+            device=device,
+            verbose=False,
+        )
+
+        if len(results) != len(batch):
+            raise RuntimeError(
+                "YOLO returned a different result count "
+                f"than input count: {len(results)} "
+                f"!= {len(batch)}"
+            )
+
+        return [
+            process_result(
+                image_path=image_path,
+                result=result,
+                names=names,
+                requested_classes=requested_classes,
+                minimum_count=minimum_count,
+                input_dir=input_dir,
+                output_dir=output_dir,
+            )
+            for image_path, result in zip(
+                batch,
+                results,
+            )
+        ]
+
+    except (
+        UnidentifiedImageError,
+        OSError,
+    ) as error:
+        logger.warning(
+            "Batch contains unreadable image. "
+            "Falling back to individual processing | %s",
+            error,
+        )
+
+    records: list[dict[str, Any]] = []
+
+    for image_path in batch:
+        valid, error = check_image(
+            image_path
+        )
+
+        if not valid:
+            logger.warning(
+                "Skipping invalid image: %s | %s",
+                image_path,
+                error,
+            )
+
+            records.append(
+                make_record(
+                    image_path=image_path,
+                    requested_classes=requested_classes,
+                    status="invalid",
+                    error=error,
+                )
+            )
+
+            continue
+
+        try:
+            result = predict_single(
+                model=model,
+                image_path=image_path,
+                confidence=confidence,
+                iou=iou,
+                class_ids=class_ids,
+                device=device,
+            )
+
+        except (
+            UnidentifiedImageError,
+            OSError,
+        ) as error:
+            logger.warning(
+                "Skipping unreadable image: %s | %s",
+                image_path,
+                error,
+            )
+
+            records.append(
+                make_record(
+                    image_path=image_path,
+                    requested_classes=requested_classes,
+                    status="invalid",
+                    error=str(error),
+                )
+            )
+
+            continue
+
+        except Exception:
+            logger.exception(
+                "YOLO inference failed on valid image: %s",
+                image_path,
+            )
+
+            raise
+
+        record = process_result(
+            image_path=image_path,
+            result=result,
+            names=names,
+            requested_classes=requested_classes,
+            minimum_count=minimum_count,
+            input_dir=input_dir,
+            output_dir=output_dir,
+        )
+
+        records.append(record)
+
+    return records
+
+
 def run_filter(config: dict[str, Any]) -> None:
     """Run YOLO dataset prefiltering."""
     logger = logging.getLogger("prefilter")
@@ -193,11 +539,11 @@ def run_filter(config: dict[str, Any]) -> None:
 
     input_dir = Path(
         dataset_config["input_dir"]
-    )
+    ).resolve()
 
     output_dir = Path(
         dataset_config["output_dir"]
-    )
+    ).resolve()
 
     device = inference_config.get(
         "device",
@@ -215,9 +561,19 @@ def run_filter(config: dict[str, Any]) -> None:
         config["output"]["manifest"]
     )
 
-    logger.info("Loading model: %s", model_path)
+    if not input_dir.exists():
+        raise FileNotFoundError(
+            f"Input directory not found: {input_dir}"
+        )
 
-    model = YOLO(model_path)
+    logger.info(
+        "Loading model: %s",
+        model_path,
+    )
+
+    model = YOLO(
+        model_path
+    )
 
     class_ids, names = get_classes(
         model=model,
@@ -244,122 +600,158 @@ def run_filter(config: dict[str, Any]) -> None:
         iou,
     )
 
-    images = get_images(input_dir)
-
     logger.info(
-        "Found %,d images",
-        len(images),
+        "Device: %s",
+        device,
     )
 
+    logger.info(
+        "Batch size: %d",
+        batch_size,
+    )
+
+    images = get_images(
+        input_dir
+    )
+
+    logger.info(
+        "Found %s images",
+        f"{len(images):,}",
+    )
+
+    (
+        processed_paths,
+        total_passed,
+        total_rejected,
+        total_invalid,
+    ) = load_processed(
+        manifest_path
+    )
+
+    if processed_paths:
+        logger.info(
+            "Resume manifest found | "
+            "processed=%s | "
+            "passed=%s | "
+            "rejected=%s | "
+            "invalid=%s",
+            f"{len(processed_paths):,}",
+            f"{total_passed:,}",
+            f"{total_rejected:,}",
+            f"{total_invalid:,}",
+        )
+
+    remaining_images = [
+        path
+        for path in images
+        if str(path) not in processed_paths
+    ]
+
+    skipped = (
+        len(images)
+        - len(remaining_images)
+    )
+
+    logger.info(
+        "Resume status | "
+        "total=%s | "
+        "skipped=%s | "
+        "remaining=%s",
+        f"{len(images):,}",
+        f"{skipped:,}",
+        f"{len(remaining_images):,}",
+    )
+
+    if not remaining_images:
+        logger.info(
+            "Nothing to process. Dataset already completed."
+        )
+        return
+
     batches = make_batches(
-        images=images,
+        images=remaining_images,
         batch_size=batch_size,
     )
 
-    records: list[dict[str, Any]] = []
-
-    total_passed = 0
-    total_failed = 0
+    session_processed = 0
 
     for batch_index, batch in enumerate(
         batches,
         start=1,
     ):
-        sources = [
-            str(path)
-            for path in batch
-        ]
-
-        results = model.predict(
-            source=sources,
-            conf=confidence,
+        batch_records = process_batch(
+            model=model,
+            batch=batch,
+            confidence=confidence,
             iou=iou,
-            classes=class_ids,
+            class_ids=class_ids,
             device=device,
-            verbose=False,
+            names=names,
+            requested_classes=requested_classes,
+            minimum_count=minimum_count,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            logger=logger,
         )
 
-        for image_path, result in zip(
-            batch,
-            results,
-        ):
-            counts = count_objects(
-                result=result,
-                names=names,
-            )
+        save_records(
+            records=batch_records,
+            manifest_path=manifest_path,
+        )
 
-            total_objects = sum(
-                counts.values()
-            )
+        session_processed += len(
+            batch_records
+        )
 
-            passed = (
-                total_objects
-                >= minimum_count
-            )
+        batch_passed = sum(
+            record["status"] == "passed"
+            for record in batch_records
+        )
 
-            destination = None
+        batch_rejected = sum(
+            record["status"] == "rejected"
+            for record in batch_records
+        )
 
-            if passed:
-                destination = copy_image(
-                    source=image_path,
-                    input_dir=input_dir,
-                    output_dir=output_dir,
-                )
+        batch_invalid = sum(
+            record["status"] == "invalid"
+            for record in batch_records
+        )
 
-                total_passed += 1
+        total_passed += batch_passed
+        total_rejected += batch_rejected
+        total_invalid += batch_invalid
 
-            else:
-                total_failed += 1
-
-            record = {
-                "source": str(image_path),
-                "passed": passed,
-                "object_count": total_objects,
-            }
-
-            for class_name in requested_classes:
-                record[
-                    f"count_{class_name}"
-                ] = counts.get(
-                    class_name,
-                    0,
-                )
-
-            if destination is not None:
-                record["destination"] = str(
-                    destination
-                )
-            else:
-                record["destination"] = ""
-
-            records.append(record)
+        total_processed = (
+            skipped
+            + session_processed
+        )
 
         logger.info(
-            "Batch %d/%d | processed=%d | passed=%d | rejected=%d",
+            "Batch %d/%d | "
+            "processed=%s/%s | "
+            "passed=%s | "
+            "rejected=%s | "
+            "invalid=%s",
             batch_index,
             len(batches),
-            len(records),
-            total_passed,
-            total_failed,
+            f"{total_processed:,}",
+            f"{len(images):,}",
+            f"{total_passed:,}",
+            f"{total_rejected:,}",
+            f"{total_invalid:,}",
         )
 
-    manifest_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    manifest = pd.DataFrame(records)
-
-    manifest.to_csv(
-        manifest_path,
-        index=False,
-    )
-
     logger.info(
-        "Completed | total=%d | passed=%d | rejected=%d",
-        len(images),
-        total_passed,
-        total_failed,
+        "Completed | "
+        "total=%s | "
+        "passed=%s | "
+        "rejected=%s | "
+        "invalid=%s",
+        f"{len(images):,}",
+        f"{total_passed:,}",
+        f"{total_rejected:,}",
+        f"{total_invalid:,}",
     )
 
     logger.info(
@@ -381,7 +773,9 @@ def main() -> None:
         "config/config.yaml"
     )
 
-    run_filter(config)
+    run_filter(
+        config
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 model:
-  path: "models/best.pt"
+  path: "/mnt/secondary/oca/person_detection/person_cctv_1_2_0.pt"
   confidence: 0.5
   iou: 0.3
 
@@ -10,7 +10,7 @@ model:
 
 dataset:
   input_dir: "/mnt/secondary/dataset/person_cctv/GW"
-  output_dir: "/mnt/secondary/dataset/person_cctv/GW_prefiltered"
+  output_dir: "/mnt/secondary/dataset/person_cctv/GW_1_3_0_prefiltered"
 
 inference:
   device: 0
@@ -18,3 +18,11 @@ inference:
 
 output:
   manifest: "data/prefilter_manifest.csv"
+
+sampler:
+  input_dir: "/mnt/secondary/dataset/person_cctv/GW_1_3_0_prefiltered"
+  output_dir: "/mnt/secondary/dataset/person_cctv/GW/1_2_0_RAW"
+  weight_file: "data/result/dataset_1.csv"
+  output_report: "data/result/sampling"
+  sample_size: 3000
+  seed: 42

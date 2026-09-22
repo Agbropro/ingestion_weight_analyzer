@@ -3,22 +3,24 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+import yaml
 
 
-BASE_DIR = Path("/mnt/secondary/dataset/person_cctv/GW")
-OUTPUT_DIR = Path("/mnt/secondary/dataset/person_cctv/GW/1_2_0_RAW")
-output_report = Path("/mnt/secondary/ingestion_weight_analyzer/data/result/sampling")
-WEIGHT_FILE = Path("data/result/dataset_1.csv")
-
-SAMPLE_SIZE = 3000
-SEED = 42
+CONFIG_PATH = "config/config.yaml"
 
 IMAGE_PATTERN = re.compile(
     r"^nvr(?P<nvr>\d+)_ch(?P<camera>\d+)_.*\.(jpg|jpeg|png)$",
     re.IGNORECASE,
 )
+
+
+def load_config(path: str) -> dict[str, Any]:
+    """Load YAML configuration."""
+    with open(path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
 
 
 def parse_image(path: Path) -> tuple[str, str] | None:
@@ -320,12 +322,26 @@ def make_report(
     )
 
 
-def main() -> None:
+def run_sampler(config: dict[str, Any]) -> None:
     """Run weighted camera sampling."""
+    sampler_config = config["sampler"]
+
+    base_dir = Path(sampler_config["input_dir"]).resolve()
+    output_dir = Path(sampler_config["output_dir"]).resolve()
+    weight_file = Path(sampler_config["weight_file"])
+    output_report = Path(sampler_config["output_report"])
+    sample_size = int(sampler_config.get("sample_size", 3000))
+    seed = int(sampler_config.get("seed", 42))
+
+    if not base_dir.exists():
+        raise FileNotFoundError(
+            f"Input directory not found: {base_dir}"
+        )
+
     print("Scanning dataset...")
 
     images = scan_images(
-        BASE_DIR
+        base_dir
     )
 
     print(
@@ -337,7 +353,7 @@ def main() -> None:
     )
 
     weights = load_weights(
-        WEIGHT_FILE
+        weight_file
     )
 
     print(
@@ -347,25 +363,25 @@ def main() -> None:
     allocation = allocate_samples(
         weights=weights,
         images=images,
-        sample_size=SAMPLE_SIZE,
+        sample_size=sample_size,
     )
 
     selected = sample_images(
         images=images,
         allocation=allocation,
-        seed=SEED,
+        seed=seed,
     )
 
-    if len(selected) != SAMPLE_SIZE:
+    if len(selected) != sample_size:
         raise RuntimeError(
-            f"Expected {SAMPLE_SIZE} images, "
+            f"Expected {sample_size} images, "
             f"got {len(selected)}."
         )
 
     copy_images(
         selected=selected,
-        base_dir=BASE_DIR,
-        output_dir=OUTPUT_DIR,
+        base_dir=base_dir,
+        output_dir=output_dir,
     )
 
     report = make_report(
@@ -374,8 +390,16 @@ def main() -> None:
         allocation=allocation,
     )
 
+    report_path = Path(f"{output_report}_sample_report.csv")
+    manifest_path = Path(f"{output_report}_sample_manifest.csv")
+
+    report_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     report.to_csv(
-        f"{output_report}_sample_report.csv",
+        report_path,
         index=False,
     )
 
@@ -386,7 +410,7 @@ def main() -> None:
                 "Camera": camera,
                 "Source": str(path),
                 "Relative_Path": str(
-                    path.relative_to(BASE_DIR)
+                    path.relative_to(base_dir)
                 ),
             }
             for nvr, camera, path in selected
@@ -394,7 +418,7 @@ def main() -> None:
     )
 
     manifest.to_csv(
-        f"{output_report}_sample_manifest.csv",
+        manifest_path,
         index=False,
     )
 
@@ -408,8 +432,14 @@ def main() -> None:
     )
 
     print(
-        f"Output: {OUTPUT_DIR}"
+        f"Output: {output_dir}"
     )
+
+
+def main() -> None:
+    """Load configuration and run sampling."""
+    config = load_config(CONFIG_PATH)
+    run_sampler(config)
 
 
 if __name__ == "__main__":
